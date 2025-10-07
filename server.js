@@ -11,215 +11,285 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// --- Config / sanity checks ---
+// --- Supabase config ---
 const SUPABASE_URL = "https://hsnrrqwanpphrjaurmho.supabase.co";
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
-if (!SUPABASE_KEY) {
-  console.warn(
-    "⚠️  SUPABASE_KEY is not set. Make sure your .env has SUPABASE_KEY (service role key)."
-  );
-}
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// JWT secret: support both JWT_SECRET and SECRET_KEY env names
-const JWT_SECRET = process.env.JWT_SECRET || process.env.SECRET_KEY || "secretkey";
+const JWT_SECRET = process.env.JWT_SECRET || "secretkey";
 
-// --- Helper: remove sensitive fields from user objects ---
+// --- Helpers ---
 const hidePassword = (user) => {
   if (!user) return user;
   const { password, ...rest } = user;
   return rest;
 };
 
-// --- Test connection at startup (non-blocking) ---
-async function testSupabaseConnection() {
-  try {
-    // use a lightweight query
-    const { data, error } = await supabase.from("users").select("user_id").limit(1);
-    if (error) throw error;
-    console.log("✅ Connected to Supabase successfully!");
-  } catch (err) {
-    console.error("❌ Supabase connection failed:", err.message || err);
-  }
-}
-testSupabaseConnection();
-
-// --------------------- MIDDLEWARE ---------------------
 function authenticateToken(req, res, next) {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-  if (!token) return res.status(401).json({ error: "Access denied (no token)" });
+  const token = req.headers["authorization"]?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "No token provided" });
 
-  jwt.verify(token, JWT_SECRET, (err, payload) => {
+  jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) return res.status(403).json({ error: "Invalid or expired token" });
-    // keep a lightweight user representation in req.user
-    req.user = payload;
+    req.user = user;
     next();
   });
 }
 
 function authorizeRoles(...roles) {
   return (req, res, next) => {
-    const role = req.user?.role;
-    if (!role || !roles.includes(role)) {
+    if (!req.user?.role || !roles.includes(req.user.role)) {
       return res.status(403).json({ error: "Forbidden: insufficient role" });
     }
     next();
   };
 }
 
-// --------------------- AUTH ROUTES ---------------------
+// --- Supabase connection test ---
+(async () => {
+  const { data, error } = await supabase.from("users").select("user_id").limit(1);
+  if (error) console.error("❌ DB connect fail:", error.message);
+  else console.log("✅ Connected to Supabase");
+})();
 
-// Register user
-app.post("/register", async (req, res) => {
+// ----------------- AUTH -----------------
+app.post("/auth/register", async (req, res) => {
   try {
-    const { name, email, password, role, faculty_id } = req.body;
+    const { name, email, password, role, faculty_id, class_id } = req.body;
 
-    // Basic validation
-    if (!name || !email || !password || !role || typeof faculty_id === "undefined") {
-      return res.status(400).json({ error: "All fields are required: name,email,password,role,faculty_id" });
+    // Validate required fields
+    if (!name || !email || !password || !role || !faculty_id) {
+      return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // Check duplicate email
-    const { data: existing, error: checkError } = await supabase
+    // Check if user already exists
+    const { data: existing } = await supabase
       .from("users")
       .select("user_id")
       .eq("email", email)
-      .limit(1)
       .maybeSingle();
-
-    if (checkError) {
-      console.error("Error checking existing email:", checkError);
-      return res.status(500).json({ error: "Database error while checking email" });
-    }
-    if (existing) {
-      return res.status(409).json({ error: "Email already registered" });
-    }
+    if (existing) return res.status(409).json({ error: "Email already registered" });
 
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Insert and return inserted row(s)
-    const { data, error } = await supabase
+    // Insert user into users table
+    const { data: user, error } = await supabase
       .from("users")
       .insert([{ name, email, password: hashedPassword, role, faculty_id }])
-      .select(); // request returning rows
+      .select()
+      .single();
+    if (error) throw error;
 
-    if (error) {
-      console.error("Supabase insert error:", error);
-      return res.status(500).json({ error: error.message || "Failed to register user" });
+    // Insert into role-specific table
+    switch (role) {
+      case "Student":
+        if (!class_id) return res.status(400).json({ error: "Class is required for students" });
+        await supabase.from("students").insert([{ user_id: user.user_id, faculty_id, class_id }]);
+        break;
+      case "Lecturer":
+        await supabase.from("lecturers").insert([{ user_id: user.user_id, faculty_id }]);
+        break;
+      case "PRL":
+        await supabase.from("prls").insert([{ user_id: user.user_id, faculty_id }]);
+        break;
+      case "PL":
+        await supabase.from("pls").insert([{ user_id: user.user_id, faculty_id }]);
+        break;
+      default:
+        return res.status(400).json({ error: "Invalid role" });
     }
 
-    // return the created user without password
-    const createdUser = Array.isArray(data) && data.length ? hidePassword(data[0]) : null;
-    res.status(201).json({ message: "User registered", user: createdUser });
-  } catch (err) {
-    console.error("Register route error:", err);
-    res.status(500).json({ error: err.message || "Server error during registration" });
-  }
-});
-
-// Login
-app.post("/login", async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ error: "Email and password required" });
-
-    const { data, error } = await supabase
-      .from("users")
-      .select("*")
-      .eq("email", email)
-      .maybeSingle();
-
-    if (error) {
-      console.error("Login lookup error:", error);
-      return res.status(500).json({ error: "Database error during login" });
-    }
-    if (!data) return res.status(401).json({ error: "Invalid credentials" });
-
-    const validPassword = await bcrypt.compare(password, data.password);
-    if (!validPassword) return res.status(401).json({ error: "Invalid credentials" });
+    // Get faculty name for returning in response
+    const { data: faculty } = await supabase
+      .from("faculties")
+      .select("faculty_name")
+      .eq("faculty_id", faculty_id)
+      .single();
 
     const token = jwt.sign(
-      { user_id: data.user_id, role: data.role, email: data.email },
+      { user_id: user.user_id, role: user.role, name: user.name, faculty_id: user.faculty_id },
       JWT_SECRET,
       { expiresIn: "1h" }
     );
 
-    res.json({ message: "Login successful", token, role: data.role });
+    // Return user info with faculty name
+    res.status(201).json({
+      message: "User registered",
+      user: {
+        user_id: user.user_id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        faculty: faculty?.faculty_name || null,
+      },
+    });
   } catch (err) {
-    console.error("Login route error:", err);
-    res.status(500).json({ error: err.message || "Server error during login" });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Get all users (safe: hide passwords)
-app.get("/users", async (req, res) => {
+app.get("/faculties", async (req, res) => {
   try {
-    const { data, error } = await supabase.from("users").select("*");
+    const { data, error } = await supabase.from("faculties").select("*");
     if (error) throw error;
-    // hide password before returning
-    const safe = Array.isArray(data) ? data.map(hidePassword) : [];
-    res.json(safe);
+    res.json(data);
   } catch (err) {
-    console.error("Get users error:", err);
-    res.status(500).json({ error: err.message || "Failed to fetch users" });
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch faculties" });
   }
 });
 
-// --------------------- REPORTS ---------------------
 
-// Add report (Lecturer only)
+app.post("/login", async (req, res) => {
+  try {
+    const { emailOrName, password } = req.body;
+    if (!emailOrName || !password) return res.status(400).json({ error: "Email/Name and password required" });
+
+    const { data: users } = await supabase
+      .from("users")
+      .select("*")
+      .or(`email.eq.${emailOrName},name.eq.${emailOrName}`)
+      .limit(1);
+
+    if (!users || users.length === 0) return res.status(404).json({ error: "User not found" });
+
+    const user = users[0];
+    const validPassword = await bcrypt.compare(password, user.password);
+    if (!validPassword) return res.status(401).json({ error: "Invalid password" });
+
+    const token = jwt.sign(
+      { user_id: user.user_id, role: user.role, name: user.name, faculty_id: user.faculty_id },
+      JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    res.json({ message: "Login successful", token, user_id: user.user_id, role: user.role, name: user.name, email: user.email });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ----------------- REPORTS -----------------
+// ----------------- REPORTS -----------------
 app.post("/reports", authenticateToken, authorizeRoles("Lecturer"), async (req, res) => {
   try {
-    const { class_name, topic, recommendations } = req.body;
-    const lecturer_id = req.user.user_id;
+    const {
+      faculty_id,
+      class_id,
+      week_of_reporting,
+      date_of_lecture,
+      course_id,
+      students_present,
+      total_students,
+      venue,
+      lecture_time,
+      topic,
+      learning_outcomes,
+      recommendations
+    } = req.body;
 
-    if (!class_name || !topic) {
-      return res.status(400).json({ error: "class_name and topic are required" });
-    }
+    // Fetch course name/code
+    const { data: course } = await supabase
+      .from("courses")
+      .select("*")
+      .eq("course_id", course_id)
+      .maybeSingle();
+
+    // Fetch class name
+    const { data: classData } = await supabase
+      .from("classes")
+      .select("class_name")
+      .eq("class_id", class_id)
+      .maybeSingle();
 
     const { data, error } = await supabase
       .from("reports")
-      .insert([{ class_name, topic, recommendations, lecturer_id }])
+      .insert([{
+        faculty_id: faculty_id || req.user.faculty_id,
+        class_id,
+        class_name: classData?.class_name || "", // <-- include class_name
+        week_of_reporting,
+        date_of_lecture,
+        course_name: course?.course_name || "",
+        course_code: course?.course_code || "",
+        lecturer_name: req.user.name,
+        students_present,
+        total_students,
+        venue,
+        lecture_time,
+        topic,
+        learning_outcomes,
+        recommendations,
+        lecturer_id: req.user.user_id
+      }])
       .select();
 
-    if (error) {
-      console.error("Insert report error:", error);
-      return res.status(500).json({ error: error.message || "Failed to add report" });
-    }
-
-    res.status(201).json({ message: "Report added", report: Array.isArray(data) ? data[0] : data });
+    if (error) throw error;
+    res.status(201).json({ message: "Report added", report: data[0] });
   } catch (err) {
-    console.error("Add report error:", err);
-    res.status(500).json({ error: err.message || "Server error adding report" });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Get all reports (authenticated)
 app.get("/reports", authenticateToken, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("reports")
-      .select("*")
+      .select(`
+        report_id,
+        week_of_reporting,
+        date_of_lecture,
+        topic,
+        learning_outcomes,
+        recommendations,
+        prl_feedback,
+        students_present,
+        total_students,
+        venue,
+        lecture_time,
+        class_id,
+        class_name,
+        lecturer_id,
+        lecturer_name,
+        course_name,
+        course_code
+      `)
       .order("created_at", { ascending: false });
 
     if (error) throw error;
-    res.json(data);
+
+    // Map to ensure fallback values
+    const reports = data.map(r => ({
+      report_id: r.report_id,
+      course_name: r.course_name || "Unknown Course",
+      course_code: r.course_code || "N/A",
+      class_name: r.class_name || "Unknown Class",
+      lecturer_name: r.lecturer_name || "Unknown Lecturer",
+      topic: r.topic || "N/A",
+      date_of_lecture: r.date_of_lecture || "N/A",
+      week_of_reporting: r.week_of_reporting || "N/A",
+      prl_feedback: r.prl_feedback || "Pending",
+      students_present: r.students_present ?? "N/A",
+      total_students: r.total_students ?? "N/A",
+      venue: r.venue || "N/A",
+      lecture_time: r.lecture_time || "N/A",
+      learning_outcomes: r.learning_outcomes || "N/A",
+      recommendations: r.recommendations || "N/A",
+    }));
+
+    res.json(reports);
   } catch (err) {
-    console.error("Get reports error:", err);
-    res.status(500).json({ error: err.message || "Failed to fetch reports" });
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// PRL adds feedback
+
 app.put("/reports/:id/feedback", authenticateToken, authorizeRoles("PRL"), async (req, res) => {
   try {
     const { feedback } = req.body;
     const { id } = req.params;
-
-    if (!feedback) return res.status(400).json({ error: "Feedback is required" });
-
     const { error } = await supabase
       .from("reports")
       .update({ prl_feedback: feedback })
@@ -228,113 +298,217 @@ app.put("/reports/:id/feedback", authenticateToken, authorizeRoles("PRL"), async
     if (error) throw error;
     res.json({ message: "Feedback added" });
   } catch (err) {
-    console.error("Add feedback error:", err);
-    res.status(500).json({ error: err.message || "Failed to add feedback" });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Lecturer dashboard
-app.get("/lecturer-dashboard", authenticateToken, authorizeRoles("Lecturer"), async (req, res) => {
+// ----------------- COURSES -----------------
+app.get("/courses", authenticateToken, async (req, res) => {
   try {
-    const lecturerId = req.user.user_id;
+    let query = supabase
+      .from("courses")
+      .select("course_id, course_name, course_code, faculty_id, faculties(faculty_name)")
+      .order("course_name", { ascending: true });
 
-    const { data: reports, error: reportError } = await supabase
-      .from("reports")
-      .select("*")
-      .eq("lecturer_id", lecturerId);
+    if (req.user.role === "PRL") query = query.eq("faculty_id", req.user.faculty_id);
 
-    if (reportError) throw reportError;
+    const { data, error } = await query;
+    if (error) throw error;
 
-    // Adjust the select to match your schema; here we request lecturer_ratings
-    const { data: ratings, error: ratingError } = await supabase
-      .from("lecturer_ratings")
-      .select("*")
-      .eq("lecturer_id", lecturerId)
-      .order("created_at", { ascending: false });
+    // Map response to include faculty_name
+    const mappedCourses = data.map(c => ({
+      course_id: c.course_id,
+      course_name: c.course_name,
+      course_code: c.course_code,
+      faculty_name: c.faculties?.faculty_name || "Unknown Faculty"
+    }));
 
-    if (ratingError) throw ratingError;
-
-    res.json({ reports, ratings });
+    res.json(mappedCourses);
   } catch (err) {
-    console.error("Lecturer dashboard error:", err);
-    res.status(500).json({ error: err.message || "Failed to load lecturer dashboard" });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// --------------------- RATINGS ---------------------
 
-// Student rates lecturer
+app.post("/courses", authenticateToken, authorizeRoles("PL"), async (req, res) => {
+  try {
+    const { course_name, course_code } = req.body;
+    const { data, error } = await supabase.from("courses").insert([{ course_name, course_code, faculty_id: req.user.faculty_id }]).select().single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ----------------- CLASSES -----------------
+
+
+// Public endpoint to get all classes
+app.get("/classes", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("classes")
+      .select("class_id, class_name, year_of_study, description, faculty_id")
+      .order("class_name", { ascending: true });
+
+    if (error) throw error;
+
+    res.json(data);
+  } catch (err) {
+    console.error("Failed to fetch classes:", err.message);
+    res.status(500).json({ error: "Failed to fetch classes" });
+  }
+});
+
+
+
+
+
+// ----------------- LECTURERS -----------------
+app.get("/lecturers", authenticateToken, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from("users").select("user_id, name, email, faculty_id").eq("role", "Lecturer");
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ----------------- RATINGS -----------------
 app.post("/rate", authenticateToken, authorizeRoles("Student"), async (req, res) => {
   try {
     const { lecturer_id, rating, comment } = req.body;
-    const student_id = req.user.user_id;
-
-    if (!lecturer_id || !rating) return res.status(400).json({ error: "lecturer_id and rating are required" });
-
-    const { error } = await supabase
-      .from("lecturer_ratings")
-      .insert([{ lecturer_id, student_id, rating, comment }]);
-
-    if (error) throw error;
-    res.json({ message: "Rating submitted" });
+    await supabase.from("lecturer_ratings").insert([{ lecturer_id, student_id: req.user.user_id, rating, comment }]);
+    res.json({ message: "Rating submitted successfully" });
   } catch (err) {
-    console.error("Rate error:", err);
-    res.status(500).json({ error: err.message || "Failed to submit rating" });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Get average ratings (RPC)
+// ----------------- RATINGS -----------------
 app.get("/ratings", authenticateToken, async (req, res) => {
   try {
-    const { data, error } = await supabase.rpc("get_average_ratings");
+    const { data, error } = await supabase
+      .from("lecturer_ratings")
+      .select(`
+        rating_id,
+        rating,
+        comment,
+        created_at,
+        lecturer:lecturer_id(user_id, name),
+        student:student_id(user_id, name)
+      `)
+      .order("rating_id", { ascending: false });
+
     if (error) throw error;
-    res.json(data);
+
+    const ratings = data.map((r) => ({
+      rating_id: r.rating_id,
+      rating: r.rating,
+      comment: r.comment || "No comment",
+      lecturer_name: r.lecturer?.name || "Unknown Lecturer",
+      student_name: r.student?.name || "Unknown Student",
+      created_at: r.created_at ? new Date(r.created_at).toLocaleString() : "N/A",
+    }));
+
+    res.json(ratings);
   } catch (err) {
-    console.error("Get ratings error:", err);
-    res.status(500).json({ error: err.message || "Failed to fetch ratings" });
+    console.error("Ratings Fetch Error:", err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// --------------------- COURSE ASSIGNMENTS (PL) ---------------------
 
-// Assign course to lecturer
+// ----------------- RATINGS SUMMARY FOR STATS -----------------
+app.get("/ratings-summary", authenticateToken, authorizeRoles("PRL"), async (req, res) => {
+  try {
+    const faculty_id = req.user.faculty_id;
+
+    const { data: lecturers, error: lecturerError } = await supabase
+      .from("users")
+      .select("user_id, name")
+      .eq("role", "Lecturer")
+      .eq("faculty_id", faculty_id);
+
+    if (lecturerError) throw lecturerError;
+
+    const summary = await Promise.all(
+      lecturers.map(async (lect) => {
+        const { data: ratings } = await supabase
+          .from("lecturer_ratings")
+          .select("rating")
+          .eq("lecturer_id", lect.user_id);
+
+        const total_ratings = ratings?.length || 0;
+        const avg_rating =
+          total_ratings > 0
+            ? (ratings.reduce((sum, r) => sum + r.rating, 0) / total_ratings).toFixed(1)
+            : "0.0";
+
+        return {
+          lecturer_id: lect.user_id,
+          lecturer_name: lect.name,
+          total_ratings,
+          avg_rating,
+        };
+      })
+    );
+
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ----------------- COURSE ASSIGNMENTS -----------------
 app.post("/assign-course", authenticateToken, authorizeRoles("PL"), async (req, res) => {
   try {
     const { course_id, lecturer_id } = req.body;
-    const assigned_by = req.user.user_id;
-
-    if (!course_id || !lecturer_id) return res.status(400).json({ error: "course_id and lecturer_id required" });
-
-    const { error } = await supabase
-      .from("course_assignments")
-      .insert([{ course_id, lecturer_id, assigned_by }]);
-
-    if (error) throw error;
+    await supabase.from("course_assignments").insert([{ course_id, lecturer_id, assigned_by: req.user.user_id }]);
     res.json({ message: "Course assigned" });
   } catch (err) {
-    console.error("Assign course error:", err);
-    res.status(500).json({ error: err.message || "Failed to assign course" });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// View all assignments (PL only)
-app.get("/assignments", authenticateToken, authorizeRoles("PL"), async (req, res) => {
+app.get("/assignments", authenticateToken, authorizeRoles("PL", "PRL", "Lecturer"), async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("course_assignments")
-      .select("assignment_id, assigned_at, courses(course_name, course_code), users(name)")
+      .select(`
+        assignment_id,
+        assigned_at,
+        course: courses(course_name, course_code),
+        lecturer: users!lecturer_id(name),
+        assigned_by_user: users!assigned_by(name),
+        lecturer_id,
+        course_id
+      `)
       .order("assigned_at", { ascending: false });
 
     if (error) throw error;
-    res.json(data);
+
+    // Filter only for the logged-in lecturer if role is Lecturer
+    const assignments = data
+      .filter(a => req.user.role === "Lecturer" ? a.lecturer_id === req.user.user_id : true)
+      .map(a => ({
+        assignment_id: a.assignment_id,
+        assigned_at: new Date(a.assigned_at).toLocaleDateString(),
+        course_id: a.course_id,
+        course_name: a.course?.course_name || "Unknown Course",
+        course_code: a.course?.course_code || "N/A",
+        lecturer_name: a.lecturer?.name || "Unknown Lecturer",
+        assigned_by: a.assigned_by_user?.name || "Unknown",
+      }));
+
+    res.json(assignments);
   } catch (err) {
-    console.error("Get assignments error:", err);
-    res.status(500).json({ error: err.message || "Failed to fetch assignments" });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// --------------------- SERVER START ---------------------
+// ----------------- SERVER START -----------------
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
