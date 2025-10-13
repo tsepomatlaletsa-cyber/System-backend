@@ -232,6 +232,41 @@ app.post("/reports", authenticateToken, authorizeRoles("Lecturer"), async (req, 
   }
 });
 
+
+app.delete("/reports/:id", authenticateToken, authorizeRoles("Lecturer"), async (req, res) => {
+  try {
+    const reportId = req.params.id;
+    const lecturerId = req.user.user_id;
+
+    // Check if report exists and belongs to this lecturer
+    const { data: existingReport, error: fetchError } = await supabase
+      .from("reports")
+      .select("*")
+      .eq("report_id", reportId)
+      .eq("lecturer_id", lecturerId)
+      .single();
+
+    if (fetchError || !existingReport) {
+      return res.status(404).json({ error: "Report not found or unauthorized" });
+    }
+
+    // Delete the report
+    const { error: deleteError } = await supabase
+      .from("reports")
+      .delete()
+      .eq("report_id", reportId)
+      .eq("lecturer_id", lecturerId);
+
+    if (deleteError) throw deleteError;
+
+    res.json({ message: "Report deleted successfully" });
+  } catch (err) {
+    console.error("❌ Delete report error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 app.get("/reports", authenticateToken, async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -341,6 +376,77 @@ app.post("/courses", authenticateToken, authorizeRoles("PL"), async (req, res) =
   }
 });
 
+
+app.put("/courses/:id", authenticateToken, authorizeRoles("PL"), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { course_name, course_code } = req.body;
+
+    // First, check if the course exists and belongs to this faculty
+    const { data: existingCourse, error: fetchError } = await supabase
+      .from("courses")
+      .select("*")
+      .eq("course_id", id)
+      .eq("faculty_id", req.user.faculty_id)
+      .single();
+
+    if (fetchError || !existingCourse) {
+      return res.status(404).json({ error: "Course not found or unauthorized" });
+    }
+
+    // Update the course
+    const { data: updatedCourse, error: updateError } = await supabase
+      .from("courses")
+      .update({ course_name, course_code })
+      .eq("course_id", id)
+      .eq("faculty_id", req.user.faculty_id)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    res.json({ message: "Course updated successfully", course: updatedCourse });
+  } catch (err) {
+    console.error("Update Course Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+
+app.delete("/courses/:id", authenticateToken, authorizeRoles("PL"), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // First, check if the course exists and belongs to this faculty
+    const { data: existingCourse, error: fetchError } = await supabase
+      .from("courses")
+      .select("*")
+      .eq("course_id", id)
+      .eq("faculty_id", req.user.faculty_id)
+      .single();
+
+    if (fetchError || !existingCourse) {
+      return res.status(404).json({ error: "Course not found or unauthorized" });
+    }
+
+    // Delete the course
+    const { error: deleteError } = await supabase
+      .from("courses")
+      .delete()
+      .eq("course_id", id)
+      .eq("faculty_id", req.user.faculty_id);
+
+    if (deleteError) throw deleteError;
+
+    res.json({ message: "Course deleted successfully" });
+  } catch (err) {
+    console.error("Delete Course Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ----------------- CLASSES -----------------
 
 
@@ -387,10 +493,45 @@ app.post("/rate", authenticateToken, authorizeRoles("Student"), async (req, res)
   }
 });
 
+
+app.delete("/rate/:id", authenticateToken, authorizeRoles("Student"), async (req, res) => {
+  try {
+    const ratingId = req.params.id;
+    const studentId = req.user.user_id;
+
+    
+    const { data: existingRating, error: fetchError } = await supabase
+      .from("lecturer_ratings")
+      .select("*")
+      .eq("rating_id", ratingId)
+      .eq("student_id", studentId)
+      .single();
+
+    if (fetchError || !existingRating) {
+      return res.status(404).json({ error: "Rating not found or unauthorized" });
+    }
+
+    // Delete the rating
+    const { error: deleteError } = await supabase
+      .from("lecturer_ratings")
+      .delete()
+      .eq("rating_id", ratingId)
+      .eq("student_id", studentId);
+
+    if (deleteError) throw deleteError;
+
+    res.json({ message: "Rating deleted successfully" });
+  } catch (err) {
+    console.error("❌ Delete rating error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 // ----------------- RATINGS -----------------
 app.get("/ratings", authenticateToken, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    let query = supabase
       .from("lecturer_ratings")
       .select(`
         rating_id,
@@ -402,6 +543,13 @@ app.get("/ratings", authenticateToken, async (req, res) => {
       `)
       .order("rating_id", { ascending: false });
 
+    // 👇 If the user is a Student, show only their own ratings
+    if (req.user.role === "Student") {
+      query = query.eq("student_id", req.user.user_id);
+    }
+
+    const { data, error } = await query;
+
     if (error) throw error;
 
     const ratings = data.map((r) => ({
@@ -410,7 +558,9 @@ app.get("/ratings", authenticateToken, async (req, res) => {
       comment: r.comment || "No comment",
       lecturer_name: r.lecturer?.name || "Unknown Lecturer",
       student_name: r.student?.name || "Unknown Student",
-      created_at: r.created_at ? new Date(r.created_at).toLocaleString() : "N/A",
+      created_at: r.created_at
+        ? new Date(r.created_at).toLocaleString()
+        : "N/A",
     }));
 
     res.json(ratings);
@@ -419,6 +569,7 @@ app.get("/ratings", authenticateToken, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 
 // ----------------- RATINGS SUMMARY FOR STATS -----------------
@@ -508,6 +659,40 @@ app.get("/assignments", authenticateToken, authorizeRoles("PL", "PRL", "Lecturer
     res.status(500).json({ error: err.message });
   }
 });
+
+// DELETE an assignment
+app.delete("/assignments/:id", authenticateToken, authorizeRoles("PL"), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    
+    const { data: existingAssignment, error: fetchError } = await supabase
+      .from("course_assignments")
+      .select("*")
+      .eq("assignment_id", id)
+      .eq("assigned_by", req.user.user_id)
+      .single();
+
+    if (fetchError || !existingAssignment) {
+      return res.status(404).json({ error: "Assignment not found or unauthorized" });
+    }
+
+   
+    const { error: deleteError } = await supabase
+      .from("course_assignments")
+      .delete()
+      .eq("assignment_id", id)
+      .eq("assigned_by", req.user.user_id);
+
+    if (deleteError) throw deleteError;
+
+    res.json({ message: "Assignment deleted successfully" });
+  } catch (err) {
+    console.error("Delete Assignment Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // ----------------- SERVER START -----------------
 const PORT = process.env.PORT || 5000;
