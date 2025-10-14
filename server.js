@@ -6,9 +6,6 @@ import jwt from "jsonwebtoken";
 import { createClient } from "@supabase/supabase-js";
 import cors from "cors";
 
-
-
-
 dotenv.config();
 const app = express();
 app.use(express.json());
@@ -20,7 +17,6 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const JWT_SECRET = process.env.JWT_SECRET || "secretkey";
-
 
 // --- Helpers ---
 const hidePassword = (user) => {
@@ -696,48 +692,6 @@ app.delete("/assignments/:id", authenticateToken, authorizeRoles("PL"), async (r
     res.status(500).json({ error: err.message });
   }
 });
-
-app.post("/upload-profile", authenticateToken, upload.single("profile"), async (req, res) => {
-  console.log("Upload request received from:", req.user);
-
-  try {
-    const file = req.file;
-    if (!file) return res.status(400).json({ error: "No file uploaded" });
-
-    const base64Image = file.buffer.toString("base64");
-    const mimeType = file.mimetype;
-    const dataUrl = `data:${mimeType};base64,${base64Image}`;
-
-    const userId = req.user.user_id;
-
-    // Save the Base64 image string to the database
-    const { error } = await supabase
-      .from("users")
-      .update({ profile_image: dataUrl })
-      .eq("user_id", userId);
-
-    if (error) throw error;
-
-    res.json({ message: "Profile updated successfully", imageUrl: dataUrl });
-  } catch (err) {
-    console.error("Profile upload error:", err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get("/me", authenticateToken, async (req, res) => {
-  const { user_id } = req.user;
-  const { data, error } = await supabase
-    .from("users")
-    .select("name, email, role, profile_image")
-    .eq("user_id", user_id)
-    .maybeSingle();
-
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
-});
-
-
 
 
 // ----------------- SERVER START -----------------
