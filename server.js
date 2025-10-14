@@ -53,7 +53,7 @@ function authorizeRoles(...roles) {
 })();
 
 // ----------------- AUTH -----------------
-app.post("/auth/register", async (req, res) => {
+app.post("/register", async (req, res) => {
   try {
     const { name, email, password, role, faculty_id, class_id } = req.body;
 
