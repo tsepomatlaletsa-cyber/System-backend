@@ -5,7 +5,7 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { createClient } from "@supabase/supabase-js";
 import cors from "cors";
-import multer from "multer";
+
 
 
 
@@ -20,8 +20,7 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const JWT_SECRET = process.env.JWT_SECRET || "secretkey";
-// File upload middleware (stores files temporarily)
-const upload = multer();
+
 
 // --- Helpers ---
 const hidePassword = (user) => {
