@@ -1,4 +1,3 @@
-// server.js
 import express from "express";
 import dotenv from "dotenv";
 import bcrypt from "bcrypt";
@@ -170,8 +169,7 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// ----------------- REPORTS -----------------
-// ----------------- REPORTS -----------------
+// ----------------- REPORTS ----------------
 app.post("/reports", authenticateToken, authorizeRoles("Lecturer"), async (req, res) => {
   try {
     const {
@@ -336,6 +334,74 @@ app.put("/reports/:id/feedback", authenticateToken, authorizeRoles("PRL"), async
     res.status(500).json({ error: err.message });
   }
 });
+
+// Update a report (lecturer can only edit their own reports)
+app.put("/reports/:id", authenticateToken, authorizeRoles("Lecturer"), async (req, res) => {
+  try {
+    const reportId = req.params.id;
+    const lecturerId = req.user.user_id;
+
+    const {
+      week_of_reporting,
+      date_of_lecture,
+      course_name,
+      course_code,
+      students_present,
+      total_students,
+      venue,
+      lecture_time,
+      topic,
+      learning_outcomes,
+      recommendations,
+      class_name,
+      class_id,
+      faculty_id
+    } = req.body;
+
+    // ✅ Ensure lecturer owns the report
+    const { data: existingReport, error: fetchError } = await supabase
+      .from("reports")
+      .select("*")
+      .eq("report_id", reportId)
+      .eq("lecturer_id", lecturerId)
+      .single();
+
+    if (fetchError || !existingReport) {
+      return res.status(404).json({ error: "Report not found or unauthorized" });
+    }
+
+    // ✅ Prevent editing PRL feedback
+    const { error: updateError } = await supabase
+      .from("reports")
+      .update({
+        week_of_reporting,
+        date_of_lecture,
+        course_name,
+        course_code,
+        students_present,
+        total_students,
+        venue,
+        lecture_time,
+        topic,
+        learning_outcomes,
+        recommendations,
+        class_name,
+        class_id,
+        faculty_id,
+        updated_at: new Date(),
+      })
+      .eq("report_id", reportId)
+      .eq("lecturer_id", lecturerId);
+
+    if (updateError) throw updateError;
+
+    res.json({ message: "Report updated successfully" });
+  } catch (err) {
+    console.error("❌ Update report error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // ----------------- COURSES -----------------
 app.get("/courses", authenticateToken, async (req, res) => {
